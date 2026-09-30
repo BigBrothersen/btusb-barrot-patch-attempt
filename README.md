@@ -8,11 +8,15 @@ worked fine on Windows on the same PC.
 
 - **Workaround:** plug the dongle in (or unplug and replug it) **after Linux
   has booted**. When the dongle is already plugged in at boot, the headset pairs
-  and authenticates but drops the connection after about 10 seconds.
-- Only a **physical** replug helps. Reloading `btusb` and re-authorizing the
-  USB device in sysfs didn't fix it, and forcing a USB suspend made the
-  controller stop responding entirely.
-- After system sleep (S3) the dongle may hang on USB and needs a replug.
+  and authenticates but drops the connection after about 10 seconds. Sometimes
+  the dongle doesn't respond on USB at all.
+- **Observed pattern:** the dongle works after a real power cycle, and breaks
+  whenever it is re-initialized without one. That includes reloading `btusb`,
+  re-authorizing it in sysfs, a USB port reset, runtime suspend/resume, system
+  sleep (S3), and rebooting (a reboot normally doesn't cut USB power).
+- Only a **physical** replug has worked. Switching the port off in software
+  doesn't cut power on this PC: its xHCI controller has no port power control
+  (`hcc params 0x20007fc1`, PPC bit = 0).
 - A kernel patch was written and tested on the assumption that this dongle has
   the known "bulk RX needs one suspend" bug of Barrot-based fake CSR dongles.
   **It does not work:** once the suspend succeeds, the controller stops
@@ -81,7 +85,10 @@ usb 1-8: device not accepting address 7, error -71
 | Kernel patch v1 (force-suspend at setup) | Suspend refused with `-11`, so no effect |
 | Kernel patch v2 ([`btusb-force-suspend-v2.patch`](experiments/btusb-force-suspend-v2.patch)) | Suspend succeeds at boot, then the controller hangs (HCI Reset timeout) |
 | USB deauthorize/reauthorize (`/sys/bus/usb/devices/1-8/authorized`) | Controller comes back up, but the headset still doesn't connect |
-| **Physical replug after boot** | **Works.** Every successful connection on 2026-09-30 followed one. In one case a very quick unplug/replug left the controller unresponsive (HCI Reset timeout); replugging again with a short pause worked. |
+| Port reset by the kernel (`usb1-port8: disabled by hub (EMI?), re-enabling...`) | Controller re-enumerates, then HCI Reset times out |
+| Switching the port off for 5 s via sysfs `disable` ([`port-power-cycle.sh`](experiments/port-power-cycle.sh)) | Controller comes back up, but the headset connection is refused. The port stays powered. |
+| Reboot with the dongle plugged in | Headset connection fails, or the dongle doesn't enumerate at all (`device descriptor read/64, error -110`; the kernel's own `attempt power cycle` doesn't revive it) |
+| **Physical replug after boot** | **Works.** Every successful connection on 2026-09-30 followed one. |
 
 ## Why the patch looked plausible, and why it failed
 
@@ -127,13 +134,14 @@ re-enumeration, with no kernel error beforehand). This happened on kernel
 
 ## Open questions
 
-- Why the dongle works when hot-plugged but not when it is already plugged in
-  at boot. The difference may be the BIOS's USB handoff, or the time between
-  power-up and driver initialization. Not investigated.
+- Whether the dongle works on the stock driver when the PC starts from fully
+  off with the dongle freshly plugged in (a true cold start). Every failed boot
+  with the stock driver may have been a warm reboot. This hasn't been tested
+  cleanly.
 - What the Windows driver does differently.
-- Whether cutting port power in software (`/sys/bus/usb/devices/1-0:1.0/usb1-port8/disable`)
-  could replace the physical replug. Untested; most desktop boards don't
-  actually switch VBUS on their root ports.
+- Whether a USB hub with real per-port power switching, controlled by
+  [uhubctl](https://github.com/mvp/uhubctl), could automate the replug.
+  Untested; most hubs don't support it.
 
 ## If you're buying a dongle
 
@@ -149,6 +157,11 @@ RTL8761B-based USB dongles (for example the TP-Link UB500; firmware is in
   it.** Kept for reference.
 - [`experiments/barrot-kick.sh`](experiments/barrot-kick.sh): userspace
   version of the same suspend. **Hangs the controller**; kept for reference.
+- [`experiments/port-power-cycle.sh`](experiments/port-power-cycle.sh):
+  switches the dongle's root-hub port off and on via sysfs `disable`. Doesn't
+  cut power on this PC, so it doesn't help here. It might on a controller with
+  port power control (check that bit 3 of the `hcc params` value in dmesg is
+  set).
 
 ## References
 
