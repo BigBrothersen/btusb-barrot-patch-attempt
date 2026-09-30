@@ -176,3 +176,4 @@ RTL8761B-based USB dongles (for example the TP-Link UB500; firmware is in
 
 The patch modifies the Linux kernel and is GPL-2.0-only, as is the script. See
 [LICENSE](LICENSE).
+# btusb-barrot-patch-attempt
