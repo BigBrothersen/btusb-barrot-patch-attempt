@@ -1,0 +1,9 @@
+linux-*/
+build/
+*.ko
+*.o
+*.mod*
+*.cmd
+Module.symvers
+modules.order
+*.btsnoop

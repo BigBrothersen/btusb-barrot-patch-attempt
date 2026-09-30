@@ -1,0 +1,104 @@
+From 62a43eb2e645a09bd604e7daf18f8d453c6ffb07 Mon Sep 17 00:00:00 2001
+From: BigBrothersen <whansen46516@gmail.com>
+Date: Wed, 30 Sep 2026 12:23:42 +0800
+Subject: [PATCH] Bluetooth: btusb: Apply force-suspend workaround to Barrot
+ 33fa:0001
+
+The Barrot "USB2.0-BT" dongle (33fa:0001, bcdDevice 0x8891) reports the
+same bcdDevice as the Barrot-based fake CSR clones (0a12:0001) handled by
+btusb_setup_csr(). Because it uses its own VID/PID it never reaches that
+code path, so it gets none of the clone workarounds.
+
+With this dongle, HCI events arrive normally but ACL data from the remote
+device does not reach the host intact. An A2DP headset connects,
+authenticates and enables encryption, then disconnects with reason 0x13
+about 10 s later because L2CAP signalling never completes. This is
+consistent with problem 1 described in btusb_setup_csr(): the bulk RX
+endpoint does not deliver data until the device has been suspended once.
+
+Add the device to the quirks table and give it a setup routine that
+performs the same force-suspend-once sequence. Unlike the CSR clones,
+this dongle does not advertise remote wakeup (bmAttributes 0xc0), so the
+needs_remote_wakeup flag set by btusb_open() makes the USB core refuse
+the suspend with -EAGAIN. Clear it around the forced suspend.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/bluetooth/btusb.c | 47 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/drivers/bluetooth/btusb.c b/drivers/bluetooth/btusb.c
+index 84f55f675..62a041109 100644
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ -898,6 +898,7 @@ static const struct usb_device_id quirks_table[] = {
+ 						     BTUSB_WIDEBAND_SPEECH },
+ 
+ 	/* Barrot Technology Bluetooth devices */
++	{ USB_DEVICE(0x33fa, 0x0001), .driver_info = BTUSB_BARROT },
+ 	{ USB_DEVICE(0x33fa, 0x0010), .driver_info = BTUSB_BARROT },
+ 	{ USB_DEVICE(0x33fa, 0x0012), .driver_info = BTUSB_BARROT },
+ 
+@@ -2682,6 +2683,45 @@ static int btusb_setup_csr(struct hci_dev *hdev)
+ 	return 0;
+ }
+ 
++/* The Barrot 33fa:0001 ("USB2.0-BT", bcdDevice 0x8891) is the same silicon
++ * as the fake CSR clones handled above, just with its own VID/PID, and has
++ * the same bulk RX problem: no ACL data is delivered until the device has
++ * been suspended once. Apply the same force-suspend workaround.
++ */
++static int btusb_setup_barrot(struct hci_dev *hdev)
++{
++	struct btusb_data *data = hci_get_drvdata(hdev);
++	int ret;
++
++	bt_dev_info(hdev, "Barrot: force-suspending once for bulk RX workaround");
++
++	/* btusb_open() has set needs_remote_wakeup, but this dongle does not
++	 * support remote wakeup, so the USB core refuses to suspend it while
++	 * the flag is set (-EAGAIN). Clear it for the forced suspend.
++	 */
++	data->intf->needs_remote_wakeup = 0;
++
++	pm_runtime_allow(&data->udev->dev);
++
++	ret = pm_runtime_suspend(&data->udev->dev);
++	if (ret >= 0)
++		msleep(200);
++	else
++		bt_dev_warn(hdev, "Barrot: couldn't suspend the device (%d)", ret);
++
++	pm_runtime_forbid(&data->udev->dev);
++
++	data->intf->needs_remote_wakeup = 1;
++
++	device_set_wakeup_capable(&data->udev->dev, false);
++
++	/* Re-enable autosuspend if this was requested */
++	if (enable_autosuspend)
++		usb_enable_autosuspend(data->udev);
++
++	return 0;
++}
++
+ static int inject_cmd_complete(struct hci_dev *hdev, __u16 opcode)
+ {
+ 	struct sk_buff *skb;
+@@ -4474,6 +4514,13 @@ static int btusb_probe(struct usb_interface *intf,
+ 			hdev->setup = btusb_setup_csr;
+ 	}
+ 
++	if (id->driver_info & BTUSB_BARROT) {
++		struct usb_device *udev = data->udev;
++
++		if (le16_to_cpu(udev->descriptor.idProduct) == 0x0001)
++			hdev->setup = btusb_setup_barrot;
++	}
++
+ 	if (id->driver_info & BTUSB_SNIFFER) {
+ 		struct usb_device *udev = data->udev;
+ 
+-- 
+2.55.0
+
